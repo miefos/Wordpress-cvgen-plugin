@@ -1,0 +1,7 @@
+{
+    "name": "cvgen/cvgen",
+    "require-dev": {
+        "symfony/var-dumper": "^6.2"
+    },
+    "require": {}
+}
