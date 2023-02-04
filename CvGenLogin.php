@@ -30,7 +30,63 @@ class CvGenLogin
         }
 
         $this->errors = $errors;
+	    add_action( 'rest_api_init', function () {
+		    register_rest_route( 'cvgen/auth/', 'send_otp', array(
+			    'methods' => 'POST',
+			    'callback' => [$this, 'my_awesome_func'],
+		    ) );
+	    } );
+	    add_action( 'rest_api_init', function () {
+		    register_rest_route( 'cvgen/auth/', 'attempt_otp', array(
+			    'methods' => 'POST',
+			    'callback' => [$this, 'my_other_awesome_func'],
+		    ) );
+	    } );
     }
+
+    function my_other_awesome_func($data) {
+	    if ($result = $this->nonce_or_email_invalid($data)) {
+		    return $result;
+	    }
+
+        return ['status' => 'ok', 'msg' => __('Attempt success!', 'cvgen')];
+    }
+
+    function my_awesome_func($data) {
+        if ($result = $this->nonce_or_email_invalid($data)) {
+            return $result;
+        }
+
+        //
+        // TODO should send OTP here
+        //
+
+	    return ['status' => "ok", 'msg' => null];
+    }
+
+    function nonce_or_email_invalid($data) {
+	    // Validate nonce
+	    if (!isset($data[$this->nonce_name]) && !wp_verify_nonce($data[$this->nonce_name], $this->nonce_name)) {
+		    return ['status' => "fail", 'msg' => __('Invalid nonce', 'cvgen')];
+	    }
+
+	    // Set email
+	    if (!isset($data['email'])) {
+		    return ['status' => "fail", 'msg' => __('Email not set', 'cvgen')];
+	    }
+
+	    $email = $data['email'];
+	    $email = is_email(sanitize_email($email));
+
+	    // validate email
+	    if (!$email) {
+		    return ['status' => "fail", 'msg' => __('Email format invalid', 'cvgen')];
+	    }
+
+        return false;
+    }
+
+
 
 
     function cvgen_register_user_from_invitation($email) {
@@ -311,6 +367,33 @@ class CvGenLogin
      * @return false|string
      */
     function cvgen_register_login_shortcode_html() {
+        if (!is_admin()) {
+	        wp_enqueue_style("cvgen_auth_frontend_style", plugin_dir_url(__FILE__) . 'build/auth.css', [], rand(0, 100));
+	        wp_enqueue_script( "cvgen_auth_frontend_react", plugin_dir_url( __FILE__ ) . 'build/auth.js', array(
+		        'wp-element'
+	        ));
+        }
+
+	    [$status, $msg] = $this->validate_request();
+        ob_start(); ?>
+
+        <div id="auth_form">
+            <pre style="display: none">
+                <?= wp_json_encode([
+                        'nonce' => wp_create_nonce($this->nonce_name),
+                        'nonce_name' => $this->nonce_name,
+
+                        'email_label' => __('Enter your email', 'cvgen'),
+                        'otp_label' => __('Received code', 'cvgen'),
+                        'submit_email' => __('Submit email', 'cvgen'),
+                        'submit_attempt_email_otp' => esc_attr__('Authenticate', 'cvgen'),
+                    ])?>
+            </pre>
+        </div>
+
+        <?php
+        return ob_get_clean();
+
 	    [$status, $msg] = $this->validate_request();
         ob_start(); ?>
 
