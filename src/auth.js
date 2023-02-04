@@ -1,32 +1,36 @@
 import React, { useState, useEffect } from 'react'
 import axios from 'axios'
 import ReactDOM from 'react-dom'
-import { createSlice, configureStore } from '@reduxjs/toolkit'
-import { TextControl, Flex, FlexBlock, FlexItem, Button, Icon, PanelBody, PanelRow, ColorPicker } from "@wordpress/components"
 import "./auth.scss"
 import { store } from './store/authStore'
 import {Provider, useDispatch, useSelector} from 'react-redux'
-import authSlicer, {setApiResponse, setEmail, setNonce, setNonceName, setOTP} from "./features/auth/authSlicer";
+import {
+  decreaseASecondUntilCanResend,
+  resetState,
+  setApiResponse,
+  setEmail,
+  setNonce,
+  setNonceName,
+  setOTP, setSecondsUntilCanResend,
+  setShouldEnterOTP, setShouldShowCanResendIn, setShouldShowResend
+} from "./features/auth/authSlicer";
 
-/**
- *  React components
- *
- */
 document.addEventListener("DOMContentLoaded", function () {
   const root = document.getElementById("auth_form")
   const data = JSON.parse(root.querySelector("pre").innerHTML)
 
   ReactDOM.render(
     <Provider store={store}>
-      <Message {...data} />
+      <Message />
       <AuthForm {...data}/>
     </Provider>,
     root
   )
 })
 
-function Message(props) {
+function Message() {
   const response = useSelector((state) => state.auth.apiResponse)
+  if (!response) return;
 
   return (
     <div className={`${response.status === 'ok' ? "ok-status-info" : "fail-status-info"}`}>
@@ -36,10 +40,8 @@ function Message(props) {
 }
 
 function AuthForm(props) {
-  const em = useSelector((state) => state.auth.apiResponse)
+  const shouldEnterOTP = useSelector((state) => state.auth.shouldEnterOTP)
   const dispatch = useDispatch()
-  console.log("auth")
-  console.log(em)
 
   useEffect(() => {
     dispatch(setNonce(props.nonce))
@@ -52,16 +54,32 @@ function AuthForm(props) {
       <EmailField {...props} />
       <div>
         {
-          em.status === 'ok'
+          shouldEnterOTP
             ?
           <div>
             <OTPField {...props} />
             <input type="submit" onClick={authorizeOTP} value={props.submit_attempt_email_otp} />
+            <ResendAssistance {...props}/>
           </div>
           :
-          <input type="submit" onClick={authorizeEmail} value={props.submit_email} />
+            <div>
+              <input type="submit" onClick={() => authorizeEmail(props)} value={props.submit_email} />
+            </div>
         }
       </div>
+    </div>
+  )
+}
+
+function ResendAssistance(props) {
+  const shouldShowResend = useSelector((state) => state.auth.shouldShowResend)
+  const shouldShowCanResendIn = useSelector((state) => state.auth.shouldShowCanResendIn)
+  const secondsUntilCanResend = useSelector((state) => state.auth.secondsUntilCanResend)
+
+  return (
+    <div>
+      {shouldShowCanResendIn && secondsUntilCanResend > 0 ? <div><small>{props.wait_until_can_be_resent} {secondsUntilCanResend}</small></div> : null}
+      {shouldShowResend && secondsUntilCanResend <= 0 ? <div onClick={() => authorizeEmail(props)}><small className="clickableDiv" >{props.resend_label}</small></div> : null}
     </div>
   )
 }
@@ -80,14 +98,16 @@ function authorizeOTP() {
   axios.post('/wp-json/cvgen/auth/attempt_otp', data)
     .then(function (response) {
       store.dispatch(setApiResponse(response.data))
-      console.log(response);
+      if (response.data.status === 'ok') {
+        location.reload()
+      }
     })
     .catch(function (error) {
-      console.log(error);
+      console.log("Error authorizing OTP");
     });
 }
 
-function authorizeEmail() {
+function authorizeEmail(props) {
   const email = store.getState().auth.email
   const nonceName = store.getState().auth.nonceName
   const nonce = store.getState().auth.nonce
@@ -96,13 +116,29 @@ function authorizeEmail() {
     [nonceName]: nonce
   }
 
+  store.dispatch(setShouldShowCanResendIn(false))
+  store.dispatch(setShouldShowResend(false))
+
   axios.post('/wp-json/cvgen/auth/send_otp', data)
     .then(function (response) {
       store.dispatch(setApiResponse(response.data))
-      console.log(response);
+      if (response.data.status === 'ok') {
+        store.dispatch(setShouldEnterOTP(true))
+      }
+      setTimeout(function(){
+        store.dispatch(setShouldShowCanResendIn(true))
+        store.dispatch(setSecondsUntilCanResend(props.waiting_time_until_can_be_resent))
+        let secondsCounter = setInterval(() => {
+          store.dispatch(decreaseASecondUntilCanResend())
+          if (store.getState().auth.secondsUntilCanResend <= 0 ) {
+            clearInterval(secondsCounter)
+            store.dispatch(setShouldShowResend(true))
+          }
+        }, 1000);
+      }, props.waiting_time_until_info_about_can_be_resent_is_shown * 1000)
     })
     .catch(function (error) {
-      console.log(error);
+      console.log("Error sending OTP");
     });
 }
 
@@ -115,7 +151,7 @@ function OTPField(props) {
         <label htmlFor="email">{props.otp_label}</label>
       </div>
       <div>
-        <input type="number" name="otp" id="otp" onChange={(e) => dispatch(setOTP(e.target.value))} />
+        <input onKeyUp={(e) => {if (e.key === "Enter") authorizeOTP()} } type="number" name="otp" id="otp" onChange={(e) => dispatch(setOTP(e.target.value))} />
       </div>
     </div>
   )
@@ -123,8 +159,6 @@ function OTPField(props) {
 
 function EmailField(props) {
   const defaultEmail = props.email
-  const email = useSelector((state) => state.auth.email)
-  const dispatch = useDispatch()
 
   return (
     <div>
@@ -132,8 +166,17 @@ function EmailField(props) {
         <label htmlFor="email">{props.email_label}</label>
       </div>
       <div>
-        <input type="email" name="email" id="email" defaultValue={defaultEmail} onChange={(e) => dispatch(setEmail(e.target.value))} />
+        <input onKeyUp={(e) => {if (e.key === "Enter") authorizeEmail(props)} }  type="email" name="email" id="email" defaultValue={defaultEmail} onChange={(e) => emailChanged(e.target.value)} />
       </div>
     </div>
   )
+}
+
+function emailChanged(newEmail) {
+  const shouldEnterOTP = store.getState().auth.shouldEnterOTP
+  if (shouldEnterOTP) {
+    store.dispatch(resetState())
+  } else {
+    store.dispatch(setEmail(newEmail))
+  }
 }

@@ -4,7 +4,6 @@ require_once("cvgen.php");
 
 class CvGenLogin
 {
-    private WP_Error $errors;
     private $otp_length = 6;
     private $expire_time = "+2 hours";
 
@@ -16,52 +15,157 @@ class CvGenLogin
 
         $this->nonce_name = 'wp_rest';
 	    $this->table_name_otp = $wpdb->prefix . 'cvgen_otp';
-	    $this->table_name_user_invitations = $wpdb->prefix . 'cvgen_user_invitations';
-        $this->status_register_ok = "register_ok";
-        $this->status_login_ok = "login_ok";
-        $this->status_fail = "fail";
-        $this->status_ok = "ok";
-        $this->status_registration_completed = "registration_completed";
-        $this->status_login_completed = "login_completed";
 
-	    global $errors;
-        if (!is_wp_error($errors)) {
-            $errors = new WP_Error();
-        }
-
-        $this->errors = $errors;
 	    add_action( 'rest_api_init', function () {
 		    register_rest_route( 'cvgen/auth/', 'send_otp', array(
 			    'methods' => 'POST',
-			    'callback' => [$this, 'my_awesome_func'],
+			    'callback' => [$this, 'validate_email_and_send_otp'],
 		    ) );
-	    } );
-	    add_action( 'rest_api_init', function () {
+
 		    register_rest_route( 'cvgen/auth/', 'attempt_otp', array(
 			    'methods' => 'POST',
-			    'callback' => [$this, 'my_other_awesome_func'],
+			    'callback' => [$this, 'validate_otp_and_login'],
 		    ) );
 	    } );
+
+	    add_action('wp_logout', function () {
+            wp_safe_redirect( home_url() );
+            exit;
+        });
     }
 
-    function my_other_awesome_func($data) {
+    function data_to_javascript() {
+	    return [
+		    'nonce' => wp_create_nonce($this->nonce_name),
+		    'nonce_name' => $this->nonce_name,
+
+		    'waiting_time_until_can_be_resent' => 30,
+		    'waiting_time_until_info_about_can_be_resent_is_shown' => 10,
+		    'email_label' => __('Enter your email', 'cvgen'),
+		    'wait_until_can_be_resent' => __('You can resend code in ', 'cvgen'),
+		    'resend_label' => __('Resend code', 'cvgen'),
+		    'otp_label' => __('Received code', 'cvgen'),
+		    'submit_email' => __('Send OTP code', 'cvgen'),
+		    'submit_attempt_email_otp' => esc_attr__('Authenticate', 'cvgen'),
+	    ];
+    }
+
+    function validate_otp_and_login($data) {
 	    if ($result = $this->nonce_or_email_invalid($data)) {
 		    return $result;
 	    }
 
-        return ['status' => 'ok', 'msg' => __('Attempt success!', 'cvgen')];
+	    $email = $data['email'];
+	    $email = is_email(sanitize_email($email));
+        $otp = $data['otp'];
+        $otp = intval(substr($otp, 0, $this->otp_length));
+        if (!$this->otp_valid($otp, $email)) {
+	        return ['status' => 'fail', 'msg' => __('OTP code is invalid', 'cvgen')];
+        }
+
+        return ['status' => 'ok', 'msg' => __('Authentication successful', 'cvgen')];
     }
 
-    function my_awesome_func($data) {
+	function otp_valid($otp, $email) {
+		$email = is_email(sanitize_email($email));
+		$user_id = get_user_by('email', $email)->ID;
+		if (!$user_id) {
+			return false;
+		}
+
+        global $wpdb;
+
+		$query = $wpdb->prepare(
+			"SELECT otp.otp, otp.ID, otp.user_id
+         FROM $this->table_name_otp as otp
+         WHERE 
+             otp.otp = %d AND 
+             otp.used_at IS NULL AND
+             otp.deactivated = 0 AND
+             otp.expire_at > UTC_TIMESTAMP AND
+             otp.user_id = %d
+         ORDER BY otp.created_at DESC
+         ", $otp, $user_id);
+
+        $row = $wpdb->get_row($query);
+
+        if (!$row || !($row->otp == $otp)) { // the second scenario should not happen in any circumstances
+            return false;
+        }
+
+        $wpdb->update($this->table_name_otp, ['used_at' => cvgen_mysql_time(time())], ['ID' => $row->ID]);
+
+        wp_set_current_user($user_id);
+        wp_set_auth_cookie($user_id);
+        return true;
+	}
+
+    function validate_email_and_send_otp($data) {
         if ($result = $this->nonce_or_email_invalid($data)) {
             return $result;
         }
 
-        //
-        // TODO should send OTP here
-        //
+	    $email = $data['email'];
+	    $email = is_email(sanitize_email($email));
 
-	    return ['status' => "ok", 'msg' => null];
+	    if ($result = $this->send_otp($email)) {
+		    return $result;
+	    } else {
+		    return ['status' => "fail", 'msg' => "OTP code could not be sent. Please contact system administrator."];
+        }
+    }
+
+    function send_otp($email) {
+        $email = is_email(sanitize_email($email));
+        if (email_exists($email)) {
+            return $this->send_otp_to_registered_user($email);
+        } else {
+            return $this->register_user_and_send_otp($email);
+        }
+    }
+
+    function send_otp_to_registered_user($email) {
+	    $email = is_email(sanitize_email($email));
+	    $user_id = get_user_by('email', $email)->ID;
+	    if (!$user_id) {
+		    return ['status' => "fail", 'msg' => "Email is not registered. Please contact system administrator."];
+	    }
+
+	    if (!($otp = $this->insert_new_otp($user_id))) {
+		    return ['status' => "fail", 'msg' => "Error generating OTP code. Please contact system administrator."];
+        }
+
+	    if (wp_mail($email, "Login attempt", "Login attempt. OTP is " . $otp)) {
+		    return ['status' => 'ok', 'msg' => __("Login attempt, mail sent", "cvgen")];
+	    } else {
+		    return ['status' => 'fail', 'msg' => __("Error sending OTP code. Please contact system administrator.", "cvgen")];
+	    }
+    }
+
+    function register_user_and_send_otp($email) {
+	    $email = is_email(sanitize_email($email));
+        if (email_exists($email)) {
+	        return ['status' => "fail", 'msg' => "Email already registered. Please contact system administrator."];
+        }
+
+	    $username = sanitize_user($this->get_random_unique_username($email));
+	    $pass = wp_generate_password(24, true, true);
+
+	    $user_id = wp_create_user($username, $pass, $email);
+
+        if (!($otp = $this->insert_new_otp($user_id))) {
+	        return ['status' => "fail", 'msg' => "Error generating OTP code. Please contact system administrator."];
+        }
+
+	    if (is_wp_error($user_id)) {
+		    return ['status' => "fail", 'msg' => "Error registering your user. Please contact system administrator."];
+	    } else {
+		    if (wp_mail($email, "Registration successful", "The registration is completed. Your OTP code is " . $otp)) {
+			    return ['status' => "ok", 'msg' => "OTP code sent to your email."];
+		    } else {
+			    return ['status' => "fail", 'msg' => "Error sending OTP code to your email. Please contact system administrator."];
+		    }
+        }
     }
 
     function nonce_or_email_invalid($data) {
@@ -86,279 +190,30 @@ class CvGenLogin
         return false;
     }
 
-
-
-
-    function cvgen_register_user_from_invitation($email) {
-	    $username = substr(strstr($email, '@', true), 0, 5); // from namename@user.com would return namen (the first five chars)
-	    $username = sanitize_user($this->get_random_unique_username($username));
-	    $pass = wp_generate_password(24, true, true);
-
-	    $user = wp_create_user($username, $pass, $email);
-        if (is_wp_error($user)) {
-            wp_die("could not create an user!");
-        } else {
-            if (wp_mail($email, "Registration successful", "The registration is completed.")) {
-                wp_die("registered and mail sent");
-            } else {
-                wp_die("err mail sending");
-            }
-        }
-    }
-
-    function insert_new_otp($user_id = null, $email = null) {
+    function insert_new_otp($user_id) {
 	    global $wpdb;
 
-        $this->deactivate_previous_otp_tokens($user_id, $email);
+        // deactivate previous user's OTP codes
+	    if (get_user_by('ID', intval($user_id))) {
+		    if ($wpdb->update($this->table_name_otp, ['deactivated' => 1], ['user_id' => $user_id]) === false) {
+			    return false;
+		    }
+	    }
+
+        // generate new code
 	    $otp = $this->generate_numeric_otp($this->otp_length);
         $data = [
 	        'otp' => $otp,
 	        'created_at' => cvgen_mysql_time(time()),
 	        'expire_at' => cvgen_mysql_time(strtotime($this->expire_time)),
+	        'user_id' => intval( $user_id )
         ];
 
-        if ($user_id) {
-	        $data['user_id'] = intval( $user_id );
-        }
-
-	    $otp_rows_inserted = $wpdb->insert($this->table_name_otp, $data);
-
-	    if ($otp_rows_inserted !== 1) {
+	    if ($wpdb->insert($this->table_name_otp, $data) !== 1) {
 		    return false;
 	    }
 
-	    return [$wpdb->insert_id, $otp];
-    }
-
-	/**
-	 * @param $user_id
-	 * @param $email
-	 */
-    function deactivate_previous_otp_tokens($user_id, $email) {
-        global $wpdb;
-
-        // deactivate otp tokens with user_id attached
-        $user_id = intval($user_id);
-        if ($user_id && get_user_by('ID', $user_id)) {
-            if ($wpdb->update($this->table_name_otp, ['deactivated' => 1], ['user_id' => $user_id]) === false) {
-                wp_die(__("Error happened 13000", "cvgen"));
-            }
-        }
-
-	    // deactivate otp tokens from invitations
-	    $email = sanitize_email($email);
-        if ($email) {
-            $sql = $wpdb->prepare("
-                UPDATE $this->table_name_otp as otp 
-                SET deactivated = 1
-                WHERE EXISTS (
-                    SELECT 1 FROM $this->table_name_user_invitations as inv
-                    WHERE inv.email = %s AND inv.otp_id = otp.id
-                );
-            ", $email);
-            $result = $wpdb->query($sql);
-            if ($result === false) {
-	            wp_die(__("Error happened 13001", "cvgen"));
-            }
-        }
-    }
-    
-    /**
-     * Function that creates new invitation and sends OTP token to user's email
-     *
-     * @param $email
-     *
-     * @return string[]
-     */
-    function create_user_invitation($email) {
-        $email = sanitize_email($email);
-
-        global $wpdb;
-        [$otp_id, $otp] = $this->insert_new_otp(null, $email);
-
-        if (!$otp_id || !$otp) {
-            wp_die("Unexpected error happened 2300");
-        }
-
-        $invitation_rows_inserted = $wpdb->insert($this->table_name_user_invitations, [
-            'otp_id' => $otp_id,
-            'email' => $email,
-            'created_at' => cvgen_mysql_time(time()),
-        ]);
-
-        if ($invitation_rows_inserted !== 1) {
-	        wp_die("Unexpected error happened 1200!");
-        }
-
-        if (wp_mail($email, "Registration successful", "Registration successful. OTP is " . $otp)) {
-            $status = $this->status_register_ok;
-            $msg = __("Registration successful. OTP is sent to email.", "cvgen");
-        } else {
-	        $this->errors->add("error_sending_email", "Error sending mail. Please contact system administrator.");
-        }
-
-	    return [$status ?? $this->status_fail, $msg ?? ""];
-    }
-
-    /**
-     * Function that logins user and sends OTP token to user's email
-     *
-     * @param $email
-     *
-     * @return string[]
-     */
-    function cvgen_login_user($email) {
-        $email = sanitize_email($email);
-        $user_id = get_user_by_email($email)->ID;
-        [$otp_id, $otp] = $this->insert_new_otp($user_id);
-        if (wp_mail($email, "Login attempt", "Login attempt. OTP is " . $otp)) {
-            return [$this->status_login_ok, __("Login attempt, mail sent", "cvgen")];
-        } else {
-	        return [$this->status_fail, __("Error sending OTP code. Please contact system administrator.", "cvgen")];
-        }
-    }
-
-	/**
-	 * @param $email
-	 *
-	 * @return array
-	 */
-    function use_otp($email) {
-        $email = sanitize_email($email);
-	    $otp = $this->sanitize_otp($_POST['otp']);
-        global $wpdb;
-        $invitations_query = $wpdb->prepare(
-	        "SELECT otp.otp, otp.ID, inv.ID as inv_ID
-         FROM $this->table_name_user_invitations as inv
-         LEFT JOIN $this->table_name_otp as otp
-         ON inv.otp_id = otp.id
-         WHERE 
-             inv.email = %s AND 
-             inv.created_user_id IS NULL AND
-             otp.otp = %d AND 
-             otp.used_at IS NULL AND
-             otp.deactivated = 0 AND
-             otp.expire_at > UTC_TIMESTAMP
-         ORDER BY otp.created_at DESC
-         ", $email, $otp);
-
-
-	    $user = get_user_by('email', $email);
-	    $login_query = $wpdb->prepare(
-		    "SELECT otp.otp, otp.ID, otp.user_id
-         FROM $this->table_name_otp as otp
-         WHERE 
-             otp.otp = %d AND 
-             otp.used_at IS NULL AND
-             otp.deactivated = 0 AND
-             otp.expire_at > UTC_TIMESTAMP AND
-             otp.user_id = %d
-         ORDER BY otp.created_at DESC
-         ", $otp, $user ? $user->ID : null);
-
-	    if (isset($_POST['action_type']) || !in_array($_POST['action_type'], [$this->status_register_ok, $this->status_login_ok])) {
-		    $action_type = $_POST['action_type'];
-		    $query = match ($action_type) {
-			    $this->status_login_ok => $login_query,
-			    $this->status_register_ok => $invitations_query,
-		    };
-
-            $row = $wpdb->get_row($query);
-
-            if (!$row) {
-	            return [$this->status_fail, __("Incorrect OTP code", "cvgen")];
-            }
-
-            if (!$row->otp == $otp) { // this should not happen in any scenario
-                wp_die(__("Unexpected error happened 13020!", "cvgen"));
-            }
-
-            $wpdb->update($this->table_name_otp, ['used_at' => cvgen_mysql_time(time())], ['ID' => $row->ID]);
-
-            if ($this->status_register_ok === $action_type) {
-                $username = $this->get_random_unique_username($email);
-	            $pass = wp_generate_password(24, true, true);
-                $user_id = wp_create_user($username, $pass, $email);
-                if (is_wp_error($user_id)) {
-	                return [$this->status_fail, __("Unexpected error 1220", "cvgen")];
-                }
-                wp_set_current_user($user_id);
-                wp_set_auth_cookie($user_id);
-                $invitation_ID = intval($row->inv_ID);
-                $wpdb->update($this->table_name_user_invitations, ['created_user_id' => $user_id], ['ID' => $invitation_ID]);
-	            wp_redirect("/");
-                die();
-	            return [$this->status_registration_completed, null];
-            } else if ($this->status_login_ok === $action_type) {
-	            if ($user->ID != $row->user_id) {
-		            return [$this->status_fail, __("Unexpected error 10000 happened.", "cvgen")];
-                }
-                $user_id = $user->ID;
-	            wp_set_current_user($user_id);
-	            wp_set_auth_cookie($user_id);
-                wp_redirect("/");
-                die();
-	            return [$this->status_login_completed, null];
-            } else {
-	            return [$this->status_fail, __("Invalid action type 1210", "cvgen")];
-            }
-	    } else {
-		    return [$this->status_fail, __("Invalid action type 1210", "cvgen")];
-	    }
-    }
-
-	/**
-	 * @return array|null[]|string[]
-	 */
-    function validate_request() {
-        // Not POST request
-	    if ( 'POST' !== filter_input( INPUT_SERVER, 'REQUEST_METHOD', FILTER_SANITIZE_STRING ) ) {
-		    return [null, null];
-	    }
-
-        // Validate nonce
-        if (!$this->wpa_isset_valid_nonce()) {
-	        return [$this->status_fail, __("Invalid nonce", "cvgen")];
-	    }
-
-        // Set email
-        if (!isset($_POST['email'])) {
-	        return [$this->status_fail, __("Email address not set", "cvgen")];
-        }
-
-        $email = sanitize_email($_POST['email']);
-
-	    // validate email
-	    if (!is_email($email)) {
-		    return [$this->status_fail, __("Invalid email", "cvgen")];
-	    }
-
-        $_SESSION['email'] = $email;
-
-	    // If OTP set
-	    if (isset($_POST['otp'])) {
-            [$status, $msg] = $this->use_otp($email);
-            if ($status === $this->status_fail) {
-                $this->errors->add("invalid otp", $msg);
-            } else if ($status === $this->status_register_ok) {
-                dd("Register ok!");
-            } else if ($status === $this->status_login_ok) {
-                dd("Login ok!");
-            }
-	    }
-
-        // OTP is not set
-        else {
-	        // check if email exists
-	        if ($this->wpa_exists_email($email)) {
-		        return $this->cvgen_login_user($email);
-	        } else {
-                return $this->create_user_invitation($email);
-	        }
-        }
-
-//	    return [$this->status_fail, __("Invalid OTP code", "cvgen")];
-        return [null, null];
+	    return $otp;
     }
 
     /**
@@ -367,113 +222,27 @@ class CvGenLogin
      * @return false|string
      */
     function cvgen_register_login_shortcode_html() {
-        if (!is_admin()) {
-	        wp_enqueue_style("cvgen_auth_frontend_style", plugin_dir_url(__FILE__) . 'build/auth.css', [], rand(0, 100));
-	        wp_enqueue_script( "cvgen_auth_frontend_react", plugin_dir_url( __FILE__ ) . 'build/auth.js', array(
-		        'wp-element'
-	        ));
-        }
-
-	    [$status, $msg] = $this->validate_request();
-        ob_start(); ?>
-
-        <div id="auth_form">
-            <pre style="display: none">
-                <?= wp_json_encode([
-                        'nonce' => wp_create_nonce($this->nonce_name),
-                        'nonce_name' => $this->nonce_name,
-
-                        'email_label' => __('Enter your email', 'cvgen'),
-                        'otp_label' => __('Received code', 'cvgen'),
-                        'submit_email' => __('Submit email', 'cvgen'),
-                        'submit_attempt_email_otp' => esc_attr__('Authenticate', 'cvgen'),
-                    ])?>
-            </pre>
-        </div>
-
-        <?php
-        return ob_get_clean();
-
-	    [$status, $msg] = $this->validate_request();
-        ob_start(); ?>
-
-        <form name="cvgen_login" id="cvgen_login" action="" method="post">
-            <?php
-            global $errors;
-            if ($errors->has_errors()):
-                foreach ($errors->errors as $error): ?>
-                    <div style="color:red;">
-                        <?=$error[0]?>
-                    </div>
-            <?php
-                endforeach;
-            endif;
-            if ($status) {
-                echo $msg;
+        if (!is_user_logged_in()) {
+            if (!is_admin()) {
+                wp_enqueue_style("cvgen_auth_frontend_style", plugin_dir_url(__FILE__) . 'build/auth.css', [], rand(0, 100));
+                wp_enqueue_script( "cvgen_auth_frontend_react", plugin_dir_url( __FILE__ ) . 'build/auth.js', array(
+                    'wp-element'
+                ));
             }
-            ?>
 
-            <p>
-                <?php
-                    // login form
-                    if (isset($status) && in_array($status, [$this->status_register_ok, $this->status_login_ok])): ?>
-                        <label for="otp"><?= __("OTP code", "cvgen"); ?></label>
-                        <input type="number" name="otp" id="otp" />
-                        <input type="text" name="email" id="email" value="<?= $_SESSION['email'] ?? ''?>" hidden />
-                        <input type="text" name="action_type" id="action_type" value="<?= $status ?>" hidden />
-                    <?php
-                    else: ?>
-                        <label for="email"><?= __("Email", "cvgen"); ?></label>
-                        <input type="text" name="email" id="email" value="email@email.com" />
-                    <?php endif;
-                ?>
-                <input type="submit" name="wpa-submit" id="wpa-submit" class="button-primary" value="<?php esc_attr_e('Log In', 'cvgen'); ?>" />
-            </p>
-            <?php do_action('wpa_login_form'); ?>
-            <?php wp_nonce_field('cvgen_auth', 'cvgen_nonce') ?>
+            ob_start(); ?>
 
-        </form>
+            <div id="auth_form">
+                <pre style="display: none">
+                    <?= wp_json_encode($this->data_to_javascript())?>
+                </pre>
+            </div>
 
-        <?php
-        return ob_get_clean();
-    }
-
-	/**
-	 * @param $otp
-	 *
-	 * @return mixed
-	 */
-    function sanitize_otp($otp) {
-	    $otp = substr($otp, 0, $this->otp_length);
-        return intval($otp);
-    }
-
-    /**
-     * Function that validates nonce
-     *
-     * @return bool
-     */
-    function wpa_isset_valid_nonce() {
-        if (isset($_POST['cvgen_nonce']) && $nonce = sanitize_key($_POST['cvgen_nonce'])) {
-            if (wp_verify_nonce($nonce, 'cvgen_auth')) {
-                return true;
-            } else {
-                $this->errors->add('invalid_account', __('Some error happened. Please try again.', 'cvgen'));
-                return false;
-            }
+            <?php
+            return ob_get_clean();
         } else {
-            return false;
+            return "<a href='" . wp_logout_url() . "'>" . __("Logout", "cvgen") . "</a>";
         }
-    }
-
-    /**
-     * Function that checks if a user with such email exists
-     *
-     * @param $email
-     * @return false|true
-     */
-    function wpa_exists_email($email){
-        return email_exists(sanitize_email($email));
     }
 
 	/**
@@ -491,12 +260,13 @@ class CvGenLogin
 	}
 
 	/**
-	 * Function that generates random username
+	 * Function that generates random `username`
 	 *
-	 * @param $prefix
+	 * @param string $prefix
+	 *
 	 * @return string
 	 */
-	function get_random_unique_username($email, $prefix = '' ){
+	function get_random_unique_username($email, string $prefix = '' ){
 		$prefix .= substr(strstr($email, '@', true), 0, 5); // from namename@user.com would return namen (the first five chars)
 		do {
 			$rnd_str = sprintf("%06d", mt_rand(1, 999999));
@@ -528,24 +298,11 @@ class CvGenLogin
             FOREIGN KEY  (user_id) REFERENCES $wpdb->users(id)
         )");
 
-		// create user invitations table
-		dbDelta("CREATE TABLE $this->table_name_user_invitations (
-            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-            otp_id bigint(20) unsigned NOT NULL,
-            email varchar(100) NOT NULL,
-            created_at datetime NOT NULL,
-            created_user_id bigint(20) unsigned,
-            PRIMARY KEY  (id),
-            FOREIGN KEY  (otp_id) REFERENCES $this->table_name_otp(id),
-            FOREIGN KEY  (created_user_id) REFERENCES $wpdb->users(id)
-        )");
-
 		// validate that tables were created
 		// if not present in db, then deactivate plugin and die with error
 		$table_show_otp = $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $this->table_name_otp ) );
-		$table_show_invitations = $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $this->table_name_user_invitations ) );
 
-		if ($wpdb->get_var($table_show_otp) !== $this->table_name_otp || $wpdb->get_var($table_show_invitations) !== $this->table_name_user_invitations) {
+		if ($wpdb->get_var($table_show_otp) !== $this->table_name_otp) {
 			deactivate_plugins(CVGEN_PLUGIN_NAME);
 			$referer_url = wp_get_referer();
 			wp_die("There was error setting up the plugin. Plugin deactivated. <br /><a href='$referer_url'>Back</a>");

@@ -5,6 +5,10 @@ const initialState = {
   otp: '',
   nonce: '',
   nonceName: '',
+  shouldEnterOTP: false,
+  shouldShowResend: false,
+  shouldShowCanResendIn: false,
+  secondsUntilCanResend: null,
   apiResponse: {msg: null, status: null},
 }
 
@@ -25,12 +29,35 @@ export const counterSlice = createSlice({
       state.nonceName = action.payload
     },
     setApiResponse: (state, action) => {
-      console.log(action)
       state.apiResponse = action.payload
     },
+    setShouldEnterOTP: (state, action) => {
+      state.shouldEnterOTP = action.payload
+    },
+    setShouldShowResend: (state, action) => {
+      state.shouldShowResend = action.payload
+    },
+    setShouldShowCanResendIn: (state, action) => {
+      state.shouldShowCanResendIn = action.payload
+    },
+    setSecondsUntilCanResend: (state, action) => {
+      state.secondsUntilCanResend = action.payload
+    },
+    decreaseASecondUntilCanResend: (state) => {
+      state.secondsUntilCanResend -= 1
+    },
+    resetState: (state, action) => {
+      const except = ['none', 'nonceName']
+
+      Object.keys(initialState).forEach(key => {
+        if (!except.includes(key)) {
+          state[key] = initialState[key]
+        }
+      })
+    }
   },
 })
 
-export const { setOTP, setEmail, setNonce, setNonceName, setApiResponse } = counterSlice.actions
+export const { setOTP, setEmail, setNonce, setNonceName, setApiResponse, setShouldEnterOTP, setShouldShowResend, setShouldShowCanResendIn, resetState, setSecondsUntilCanResend, decreaseASecondUntilCanResend } = counterSlice.actions
 
 export default counterSlice.reducer

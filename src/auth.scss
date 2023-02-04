@@ -21,4 +21,16 @@
   .fail-status-info {
     color: red;
   }
+
+  [disabled] {
+    cursor: not-allowed;
+  }
+
+  small {
+    font-size: 12px;
+  }
+
+  .clickableDiv {
+    cursor: pointer;
+  }
 }
