@@ -27,7 +27,7 @@ class cvgen {
     public function __construct()
     {
         $this->cvgenauth = new CvGenLogin();
-//		$this->cvgen_post_type = new CvGenPostType();
+		$this->cvgen_post_type = new CvGenPostType();
     }
 
 }

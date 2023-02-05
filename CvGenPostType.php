@@ -1,21 +1,49 @@
 <?php
+require_once "CVMetaBox.php";
 
 class CvGenPostType {
-
 	public function __construct() {
 		add_action( 'init', [$this, 'cv_post_type'], 0);
-		add_action( 'transition_post_status', [$this, 'wpse118970_post_status_new'], 10, 3 );
+		add_action( 'transition_post_status', [$this, 'prevent_publishing_posts_publicly'], 10, 3 );
 		add_action( 'get_header', [$this, 'am_do_acf_form_head'], 1 );
 		add_shortcode( 'cv_frontend_fields', [$this, 'wpdocs_footag_func'] );
+
+        $this->nonce_name = 'wp_rest';
+		$this->CVMetaBox = new CVMetabox();
+
+		add_action( 'rest_api_init', function () {
+			register_rest_route( 'cvgen/cvpost/', 'update', array(
+				'methods' => 'POST',
+				'callback' => [$this, 'api_update_post'],
+				'current_user_id' => get_current_user_id(), // This will be pass to the rest API callback
+			) );
+		} );
 	}
 
-	/**
-	 * Add required acf_form_head() function to head of page
-    */
-	function am_do_acf_form_head() {
-		if ( !is_admin() )
-			acf_form_head();
-	}
+    function api_update_post($data) {
+	    $current_user_id = $data->get_attributes()['current_user_id']; // !! this should come from php not js
+
+	    // Validate nonce
+	    if (!isset($data[$this->nonce_name]) && !wp_verify_nonce($data[$this->nonce_name], $this->nonce_name)) {
+		    return ['status' => "fail", 'msg' => __('Invalid nonce', 'cvgen')];
+	    }
+
+        $cv = $this->get_current_users_cv($current_user_id);
+
+        $fields = $this->CVMetaBox->meta_fields;
+        $result = [];
+        foreach($fields as $field) {
+//            if ($field['type'] === 'repeatable') {
+//                $data[$field['id']] = wp_json_encode($data[$field['id']]);
+//            }
+
+            if (update_post_meta($cv->ID, $field['id'], $data[$field['id']])) { // do update
+                $result[] = $field['id'];
+	        }
+        }
+
+	    return ['status' => "ok", 'msg' => "CV Updated", "updated_fields" => $result];
+    }
 
 	/**
 	 * This method prevents publishing posts publicly
@@ -26,15 +54,17 @@ class CvGenPostType {
 	 * @param $post
 	 * @return void
 	 */
-	function wpse118970_post_status_new( $new_status, $old_status, $post ) {
+	function prevent_publishing_posts_publicly( $new_status, $old_status, $post ) {
 		if ( $post->post_type == 'cv' && $new_status == 'publish' && $old_status  != $new_status ) {
 			$post->post_status = 'private';
 			wp_update_post( $post );
 		}
 	}
 
-	public function get_current_users_cv_id() {
+	public function get_current_users_cv($current_user_id_backup = null) {
 		$current_user_id = wp_get_current_user()->ID;
+        if (!$current_user_id)
+            $current_user_id = $current_user_id_backup;
 
 		if ($current_user_id) {
 			$users_cvs = get_posts([
@@ -43,45 +73,62 @@ class CvGenPostType {
 				'post_status' => array('publish', 'pending', 'draft', 'future', 'private', 'inherit')
 			]);
 
-			if (!empty($users_cvs)) {
-				$the_cv = $users_cvs[0]; // should not be more than one but it is not restricted also
-
-				return $the_cv->ID;
-			} else {
-				return null;
-			}
+			return $users_cvs[0] ?? null; // should not be more than one
 		} else {
 			return null;
 		}
 	}
 
+	function data_to_javascript($cv) {
+		return [
+			'fields' => $this->CVMetaBox->meta_fields,
+            'cv' => $cv,
+            'nonce' => wp_create_nonce($this->nonce_name),
+            'nonce_name' => $this->nonce_name,
+            'meta' => get_post_meta($cv->ID)
+		];
+	}
+
 	function wpdocs_footag_func( $atts ) {
-		// Register form.
-		acf_register_form(array(
-			'id'       => 'new-event',
-			'post_id'  => 'new_post',
-			'new_post' => array(
-				'post_type'   => 'cv'
-			),
-			'post_title'  => false,
-			'post_content'=> false,
-		));
+		$cv = $this->get_current_users_cv();
 
-		acf_form_head();
-		$cv_id = $this->get_current_users_cv_id();
+		if (is_user_logged_in()) {
+            if (!$cv) {
+	            $current_user = wp_get_current_user();
+                wp_insert_post([
+                    'post_type' => 'cv',
+                    'post_title' => 'CV: ' . $current_user->user_email,
+                    'post_status' => 'private',
+                    'post_author' => $current_user->ID
+                ]);
 
-		ob_start();
-		if (!$cv_id) {
-			echo "NEW";
-			acf_form('new-event'); // new form
+	            $cv = $this->get_current_users_cv();
+
+                if (!$cv) {
+                    wp_die("Something went wrong!");
+                }
+            }
+
+			if (!is_admin()) {
+				wp_enqueue_style("cvgen_cvpost_frontend_style", plugin_dir_url(__FILE__) . 'build/main.css', [], '1.0');
+				wp_enqueue_script( "cvgen_cvpost_frontend_react", plugin_dir_url( __FILE__ ) . 'build/cvpost.js', array(
+					'wp-element'
+				));
+			}
+
+			ob_start(); ?>
+
+			<div id="cvpost_form">
+                <pre style="display: none">
+                    <?= wp_json_encode($this->data_to_javascript($cv))?>
+                </pre>
+			</div>
+
+			<?php
+			return ob_get_clean();
 		} else {
-			echo "EXISTING" . $cv_id;
-			acf_form(['id' => 'new-event', 'post_id' => $cv_id]); // existing form
+			return "Authenticate to create or edit your CV";
 		}
-		$ret = ob_get_contents();
-		ob_end_clean();
-
-		return $ret;
 	}
 
 	/**

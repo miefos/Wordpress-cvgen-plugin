@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import axios from 'axios'
 import ReactDOM from 'react-dom'
-import "./auth.scss"
-import { store } from './store/authStore'
+import { store } from './store/mainStore'
 import {Provider, useDispatch, useSelector} from 'react-redux'
 import {
   decreaseASecondUntilCanResend,
@@ -79,7 +78,7 @@ function ResendAssistance(props) {
   return (
     <div>
       {shouldShowCanResendIn && secondsUntilCanResend > 0 ? <div><small>{props.wait_until_can_be_resent} {secondsUntilCanResend}</small></div> : null}
-      {shouldShowResend && secondsUntilCanResend <= 0 ? <div onClick={() => authorizeEmail(props)}><small className="clickableDiv" >{props.resend_label}</small></div> : null}
+      {shouldShowResend && secondsUntilCanResend <= 0 ? <div onClick={() => authorizeEmail(props)}><small className="clickableElem" >{props.resend_label}</small></div> : null}
     </div>
   )
 }

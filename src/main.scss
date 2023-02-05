@@ -1,6 +1,13 @@
-#auth_form {
+#auth_form, #cvpost_form {
   input {
     padding: 7px;
+    border-radius: 5px;
+    border: 1px gray solid;
+  }
+
+  select {
+    margin: 5px;
+    padding: 5px;
     border-radius: 5px;
     border: 1px gray solid;
   }
@@ -30,7 +37,7 @@
     font-size: 12px;
   }
 
-  .clickableDiv {
+  .clickableElem {
     cursor: pointer;
   }
 }

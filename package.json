@@ -4,8 +4,8 @@
   "description": "This plugin aims to have 2 functionalities:\r 1) Authentification with OTP \r    * Registration with OTP \r    * Login with OTP\r 2) Curriculum Vitae functionality\r    * Custom post type \r    * Capabilities (permissions)\r    * PDF generator\r    * The fields for CV is defined in ACF plugin",
   "main": "index.js",
   "scripts": {
-    "build": "wp-scripts build src/auth.js src/js2.js",
-    "start": "wp-scripts start src/auth.js src/js2.js",
+    "build": "wp-scripts build src/auth.js src/cvpost.js src/main.js",
+    "start": "wp-scripts start src/auth.js src/cvpost.js src/main.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

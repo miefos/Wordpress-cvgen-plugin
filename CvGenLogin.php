@@ -28,6 +28,12 @@ class CvGenLogin
 		    ) );
 	    } );
 
+        add_action('after_setup_theme', function () {
+	        if (!current_user_can('administrator') && !is_admin()) {
+		        show_admin_bar(false);
+	        }
+        });
+
 	    add_action('wp_logout', function () {
             wp_safe_redirect( home_url() );
             exit;
@@ -224,7 +230,7 @@ class CvGenLogin
     function cvgen_register_login_shortcode_html() {
         if (!is_user_logged_in()) {
             if (!is_admin()) {
-                wp_enqueue_style("cvgen_auth_frontend_style", plugin_dir_url(__FILE__) . 'build/auth.css', [], rand(0, 100));
+                wp_enqueue_style("cvgen_auth_frontend_style", plugin_dir_url(__FILE__) . 'build/main.css', [], '1.0');
                 wp_enqueue_script( "cvgen_auth_frontend_react", plugin_dir_url( __FILE__ ) . 'build/auth.js', array(
                     'wp-element'
                 ));
@@ -232,7 +238,7 @@ class CvGenLogin
 
             ob_start(); ?>
 
-            <div id="auth_form">
+            <div id="auth_form" class="alignleft" style="width:100%">
                 <pre style="display: none">
                     <?= wp_json_encode($this->data_to_javascript())?>
                 </pre>
